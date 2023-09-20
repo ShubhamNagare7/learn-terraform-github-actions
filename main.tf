@@ -15,60 +15,268 @@ terraform {
   required_version = ">= 1.1.0"
 }
 
+#----------Bucket---Lake---------------
 provider "aws" {
-  region = "us-west-2"
+  region = "us-east-1"
 }
 
-resource "random_pet" "sg" {}
-
-data "aws_ami" "ubuntu" {
-  most_recent = true
-
-  filter {
-    name   = "name"
-    values = ["ubuntu/images/hvm-ssd/ubuntu-focal-20.04-amd64-server-*"]
-  }
-
-  filter {
-    name   = "virtualization-type"
-    values = ["hvm"]
-  }
-
-  owners = ["099720109477"] # Canonical
-}
-
-resource "aws_instance" "web" {
-  ami                    = data.aws_ami.ubuntu.id
-  instance_type          = "t2.micro"
-  vpc_security_group_ids = [aws_security_group.web-sg.id]
-
-  user_data = <<-EOF
-              #!/bin/bash
-              apt-get update
-              apt-get install -y apache2
-              sed -i -e 's/80/8080/' /etc/apache2/ports.conf
-              echo "Hello World" > /var/www/html/index.html
-              systemctl restart apache2
-              EOF
-}
-
-resource "aws_security_group" "web-sg" {
-  name = "${random_pet.sg.id}-sg"
-  ingress {
-    from_port   = 8080
-    to_port     = 8080
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-  // connectivity to ubuntu mirrors is required to run `apt-get update` and `apt-get install apache2`
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
+resource "aws_s3_bucket" "bucket1" {
+  bucket = "datalake-rawzone-group1dbda-8sept" 
+  tags = {
+    Name = "My bucket"
   }
 }
 
-output "web-address" {
-  value = "${aws_instance.web.public_dns}:8080"
+resource "aws_s3_bucket_ownership_controls" "bucket1" {
+  bucket = aws_s3_bucket.bucket1.id
+  rule {
+    object_ownership = "BucketOwnerPreferred"
+  }
+}
+
+resource "aws_s3_bucket_public_access_block" "bucket1" {
+  bucket = aws_s3_bucket.bucket1.id
+
+  block_public_acls       = false
+  block_public_policy     = false
+  ignore_public_acls      = false
+  restrict_public_buckets = false
+}
+
+resource "aws_s3_bucket_acl" "bucket1" {
+  depends_on = [
+    aws_s3_bucket_ownership_controls.bucket1,
+    aws_s3_bucket_public_access_block.bucket1,
+  ]
+
+  bucket = aws_s3_bucket.bucket1.id
+  acl    = "public-read"
+}
+
+resource "aws_s3_object" "object1_transaction" {
+  bucket = aws_s3_bucket.bucket1.id
+  key    = "Transactions/"
+}
+
+resource "aws_s3_object" "object2_customers" {
+  bucket = aws_s3_bucket.bucket1.id
+  key    = "Customers/"
+}
+
+resource "aws_s3_object" "object3_articles" {
+  bucket = aws_s3_bucket.bucket1.id
+  key    = "Articles/"
+}
+
+#---------------------Redshift-Log-Bucket--------------------
+
+resource "aws_s3_bucket" "bucket2" {
+  bucket = "redshift-logs-group1dbda-8sept" 
+  tags = {
+    Name = "My bucket RS Logs"
+  }
+}
+
+resource "aws_s3_bucket_ownership_controls" "bucket2" {
+  bucket = aws_s3_bucket.bucket2.id
+  rule {
+    object_ownership = "BucketOwnerPreferred"
+  }
+}
+
+resource "aws_s3_bucket_public_access_block" "bucket2" {
+  bucket = aws_s3_bucket.bucket2.id
+
+  block_public_acls       = false
+  block_public_policy     = false
+  ignore_public_acls      = false
+  restrict_public_buckets = false
+}
+
+resource "aws_s3_bucket_acl" "bucket2" {
+  depends_on = [
+    aws_s3_bucket_ownership_controls.bucket2,
+    aws_s3_bucket_public_access_block.bucket2,
+  ]
+
+  bucket = aws_s3_bucket.bucket2.id
+  acl    = "public-read"
+}
+
+
+#-------------Redshift----Cluster----------------------------
+
+
+resource "aws_redshift_cluster" "redshiftCluster1" {
+  cluster_identifier = "tf-redshift-cluster"
+  database_name      = "dev"
+  master_username    = "awsuser"
+  master_password    = "HM27march99" 
+  node_type          = "dc2.large"
+  cluster_type       = "single-node"
+}
+
+resource "aws_redshift_cluster_iam_roles" "redshiftCluster1" {
+  cluster_identifier = aws_redshift_cluster.redshiftCluster1.cluster_identifier
+  iam_role_arns      = ["arn:aws:iam::381074404087:role/LabRole"] 
+} 
+
+#----------------HIST-CUST-ART-SOURCE-LAKE-------------------------
+
+resource "aws_glue_job" "glue_job1" {
+  name = "Cust_Article_source_lake_upd"
+  role_arn = "arn:aws:iam::381074404087:role/LabRole" 
+  description = "Get Data from Source to Lake" 
+  max_retries = "0"
+  timeout = 60
+  number_of_workers = 2
+  worker_type = "Standard"
+  command {
+    script_location = "s3://handm-glue-job-scripts/Historic-Customer-Article-Source-to-Lake.py"
+    python_version = "3"
+  }
+  glue_version = "4.0"
+}
+
+#------------------HIST-TRANSAC-SOURCE-LAKE-----------------------------
+
+resource "aws_glue_job" "glue_job2" {
+  name = "transac_hist_source-lake_upd"
+  role_arn = "arn:aws:iam::381074404087:role/LabRole" 
+  description = "Get Transaction Data from source to Lake"
+  max_retries = "0"
+  timeout = 60
+  number_of_workers = 2
+  worker_type = "Standard"
+  command {
+    script_location = "s3://handm-glue-job-scripts/Historic-Transaction-Source-to-Lake.py"
+    python_version = "3"
+  }
+  glue_version = "4.0"
+}
+
+#--------------------HIST-LAKE-REDSHIFT---------------------------
+
+resource "aws_glue_job" "glue_job3" {
+  name = "Lake-Redshift-hist-upd"
+  role_arn = "arn:aws:iam::381074404087:role/LabRole" 
+  description = "DataWarehousing for historic Data"
+  max_retries = "0"
+  timeout = 60
+  number_of_workers = 2
+  worker_type = "Standard"
+  command {
+    script_location = "s3://handm-glue-job-scripts/Historic-data-from-lake-to-redshift.py"
+    python_version = "3"
+  }
+  glue_version = "4.0"
+}
+
+#----------------------DATA-INGESTION-OF-LIVE-DATA(RDS)-TO-LAKE-------------------------
+
+resource "aws_glue_job" "glue_job4" {
+  name = "Transac_Cust_Art_Live_source_lake"
+  role_arn = "arn:aws:iam::381074404087:role/LabRole" 
+  description = "Data Ingestion of Live Data"
+  max_retries = "0"
+  timeout = 60
+  number_of_workers = 2
+  worker_type = "Standard"
+  command {
+    script_location = "s3://handm-glue-job-scripts/Transac-Cust-Article-Live-Source-to-Lake.py"
+    python_version = "3"
+  }
+  glue_version = "4.0"
+}
+
+#------------------LIVE-DATA-LAKE-REDSHIFT-----------------------------
+
+resource "aws_glue_job" "glue_job5" {
+  name = "Live_data_lake_redshift"
+  role_arn = "arn:aws:iam::381074404087:role/LabRole" 
+  description = "DataWarehousing for Live Data"
+  max_retries = "0"
+  timeout = 60
+  number_of_workers = 2
+  worker_type = "Standard"
+  command {
+    script_location = "s3://handm-glue-job-scripts/Live-data-from-lake-to-redshift.py"
+    python_version = "3"
+  }
+  glue_version = "4.0"
+}
+
+#---------------------HIST-DATA-PIPELINE-SFN--------------------------
+
+
+resource "aws_sfn_state_machine" "sfn_state_machine" {
+  name     = "hist-data-source-to-redshift"
+  role_arn = "arn:aws:iam::381074404087:role/LabRole" 
+
+  definition = <<EOF
+{
+  "Comment": "A description of my state machine",
+  "StartAt": "cust-article-hist-source-lake",
+  "States": {
+    "cust-article-hist-source-lake": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName": "Cust_Article_source_lake_upd"
+      },
+      "Next": "transaction-hist-source-lake"
+    },
+    "transaction-hist-source-lake": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName": "transac_hist_source-lake_upd"
+      },
+      "Next": "Lake-Redshift-hist-upd"
+    },
+    "Lake-Redshift-hist-upd": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName": "Lake-Redshift-hist-upd"
+      },
+      "End": true
+    }
+  }
+}
+EOF
+}
+
+
+#--------------------LIVE-DATA-PIPELINE-SFN---------------------------
+
+
+resource "aws_sfn_state_machine" "sfn_state_machine1" {
+  name     = "Live-data-source-to-redshift"
+  role_arn = "arn:aws:iam::381074404087:role/LabRole" 
+
+  definition = <<EOF
+{
+  "Comment": "A description of my state machine",
+  "StartAt": "Glue StartJobRun",
+  "States": {
+    "Glue StartJobRun": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName": "Transac_Cust_Art_Live_source_lake"
+      },
+      "Next": "Live-Source-Redshift"
+    },
+    "Live-Source-Redshift": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName": "Live_data_lake_redshift"
+      },
+      "End": true
+    }
+  }
+}
+EOF
 }
